@@ -72,7 +72,8 @@ type DeleteResult struct {
 //
 // 읽기 전용 락(RWMutex)을 쓰지 않는 이유: Get도 만료 항목을 삭제하는 쓰기 연산이다.
 // 읽기 락으로 확인하고 쓰기 락으로 삭제하면 그 사이에 들어온 새 Set 값을 지울 수 있어
-// 재확인 로직이 필요하다. 임계 구역이 0.1µs 수준이라 단일 Mutex로 충분하다.
+// 재확인 로직이 필요하다. 단일 Mutex는 이 규칙을 단순하게 보장한다.
+// 성능상 충분한지는 실제 요청 부하로 별도 측정한다.
 type Store struct {
 	mu           sync.Mutex
 	table        *hashtable.Table

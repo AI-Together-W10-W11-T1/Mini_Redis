@@ -460,6 +460,7 @@ func TestStoreConcurrentExpirationAndResize(t *testing.T) {
 		}
 		for i := 0; i < keys; i++ {
 			expectLookup(t, s, fmt.Sprintf("old:%d", i), LookupResult{Live, "fresh", -1})
+			expectLookup(t, s, fmt.Sprintf("grow:%d:%d", i%writers, i), LookupResult{Live, "x", -1})
 		}
 		s.mu.Lock()
 		count := s.table.Len()
@@ -471,8 +472,8 @@ func TestStoreConcurrentExpirationAndResize(t *testing.T) {
 	})
 }
 
-// BenchmarkStoreParallel는 락 안에서 보내는 시간(연산 1회 비용)을 측정한다.
-// HTTP 요청 1건(수십 µs)과 비교해 단일 락이 병목인지 판단하는 근거로 쓴다.
+// BenchmarkStoreParallel은 병렬 부하에서 전체 경과 시간/연산 수를 측정한다.
+// ns/op는 개별 요청 지연이나 락 보유 시간이 아니다. HTTP 병목은 따로 측정한다.
 func BenchmarkStoreParallel(b *testing.B) {
 	keys := make([]string, 1024)
 	for i := range keys {
@@ -488,6 +489,7 @@ func BenchmarkStoreParallel(b *testing.B) {
 			}
 			var worker sync.Mutex
 			next := 0
+			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
 				worker.Lock()
 				i := next * 7919

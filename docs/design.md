@@ -82,6 +82,7 @@ docs/results/                  성능 측정 CSV·실행 환경·결과 해석
 | 시그니처 | 계약 |
 |---|---|
 | `NewHandler(store *store.Store, logger *slog.Logger) http.Handler` | 같은 Store를 사용하는 HTTP 핸들러 생성 |
+| `NewHandlerWithMaxBodyBytes(store *store.Store, logger *slog.Logger, limit int64) http.Handler` | 기본 생성자와 같은 API 동작에 양의 본문 크기 설정 적용. 기본 생성자는 512 KiB 사용 |
 | `(*Handler).ServeKey(w http.ResponseWriter, r *http.Request)` | `/keys/{key}` 하나에 등록. 메서드를 직접 분기해 Set·Get·Delete 호출, 나머지는 JSON 405 |
 | `(*Handler).Set(w http.ResponseWriter, r *http.Request)` | 키·JSON 해석 → store.Set → JSON 응답 |
 | `(*Handler).Get(w http.ResponseWriter, r *http.Request)` | store.Get의 Live는 200, Missing·Expired는 404 |

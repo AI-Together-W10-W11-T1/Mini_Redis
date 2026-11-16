@@ -9,6 +9,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         go: ['1.22.x', stable]
+        # Go 1.22로 만든 레이스 테스트 바이너리는 최신 macOS 러너에서
+        # "missing LC_UUID load command"로 실행 전에 중단된다.
+        # 최소 버전(1.22) 호환은 Linux에서, macOS는 stable에서 확인한다.
+        exclude:
+          - os: macos-latest
+            go: '1.22.x'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

@@ -6,7 +6,7 @@
 test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./...
 ```
 
-마지막 확인: 2026-11-16, Go 1.24 linux/amd64에서 위 명령 전체 통과. GitHub Actions는 Go 1.22와 최신 버전, Ubuntu와 macOS에서 같은 명령을 실행합니다.
+마지막 확인: 2026-11-16, Go 1.24 linux/amd64에서 위 명령 전체 통과. GitHub Actions는 Ubuntu에서 Go 1.22와 최신 버전, macOS에서 최신 버전으로 같은 명령을 실행합니다. Go 1.22로 만든 레이스 테스트 바이너리는 최신 macOS 러너에서 실행 전에 중단되어(`missing LC_UUID load command`) macOS의 Go 1.22 조합은 제외했습니다.
 
 ## 과제 요구사항
 

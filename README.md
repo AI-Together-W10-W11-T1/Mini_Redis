@@ -6,7 +6,7 @@
 
 ## 설치와 실행
 
-소스 빌드는 Go 1.22 이상이 필요합니다. 운영 바이너리는 보안 패치를 받는 Go 버전으로 빌드하세요. AOF는 Linux·macOS의 로컬 파일 시스템에서 지원하며 Windows는 메모리 모드만 지원합니다.
+소스 빌드는 Go 1.22 이상이 필요합니다. 최신 macOS에서는 최신 Go 사용을 권장합니다. 운영 바이너리는 보안 패치를 받는 Go 버전으로 빌드하세요. AOF는 Linux·macOS의 로컬 파일 시스템에서 지원하며 Windows는 메모리 모드만 지원합니다.
 
 ```bash
 git clone https://github.com/AI-Together-W10-W11-T1/Mini_Redis.git

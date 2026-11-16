@@ -91,18 +91,23 @@ func (s *Store) reclaimExpiredHeld(budget int) sweepResult {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			now := s.clock.Now()
-			result.Done = s.table.ScanWeak(&s.sweepCursor, batch, func(key string, _ hashtable.Record) {
+			// Reap only offers nodes that are still in the table and reads the
+			// record from the node itself, so a value stored again under the same
+			// key is judged by its own expiry and never deleted by mistake.
+			result.Done = s.table.Reap(&s.sweepCursor, batch, func(_ string, r hashtable.Record) bool {
 				result.Visited++
-				// A removed node may still be in the weak cursor. Recheck membership
-				// and expiry so a replacement under the same key is never deleted.
-				r, ok := s.table.Get(key)
-				if ok && !r.ExpiresAt.IsZero() && !now.Before(r.ExpiresAt) && s.removeLocked(key) {
-					result.Removed++
-					freed += deleteRecordBytes(key)
-				}
+				return !r.ExpiresAt.IsZero() && !now.Before(r.ExpiresAt)
+			}, func(key string, r hashtable.Record) {
+				s.usedBytes -= entryBytes(key, r)
+				result.Removed++
+				freed += deleteRecordBytes(key)
 			})
 			if result.Done {
 				s.sweepCursor = hashtable.ScanCursor{}
+				// A finished pass is the one point where giving back an oversized
+				// bucket array is cheap: the caller holds the mutation gate, so no
+				// snapshot or reservation scan is in progress.
+				s.table.Shrink()
 			}
 		}()
 		if s.aof != nil && freed > 0 {

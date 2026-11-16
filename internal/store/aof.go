@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bufio"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -227,9 +228,13 @@ func replay(f *os.File, s *Store) (bool, error) {
 	}
 	offset := int64(len(aofMagic))
 	now := s.clock.Now()
+	// Buffer the sequential read: without it every frame costs two read system
+	// calls. offset is counted separately, so tail repair still truncates at
+	// the exact end of the last complete frame.
+	reader := bufio.NewReaderSize(f, 1<<20)
 	for {
 		var length [8]byte
-		n, err := io.ReadFull(f, length[:])
+		n, err := io.ReadFull(reader, length[:])
 		if err == io.EOF && n == 0 {
 			return false, nil
 		}
@@ -244,7 +249,7 @@ func replay(f *os.File, s *Store) (bool, error) {
 			return false, fmt.Errorf("invalid AOF frame length at %d", offset)
 		}
 		payload := make([]byte, int(size)+4)
-		if _, err = io.ReadFull(f, payload); err != nil {
+		if _, err = io.ReadFull(reader, payload); err != nil {
 			return repairTail(f, offset, err)
 		}
 		if crc32.ChecksumIEEE(payload[:size]) != binary.BigEndian.Uint32(payload[size:]) {

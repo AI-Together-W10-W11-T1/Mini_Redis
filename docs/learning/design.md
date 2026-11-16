@@ -33,7 +33,7 @@ docs/results/                  성능 측정 CSV·실행 환경·결과 해석
 | ② store | 입력 검증, 메모리 락·변경 순서 락, TTL·삭제·AOF | hashtable과 자신이 정의한 Clock 사용. HTTP 의존 금지 |
 | ③ hashtable | FNV-1a 64비트, 체이닝, 키 비교, 개수·확장 | 표준 라이브러리만 사용. store·HTTP 역참조와 TTL 판단 금지 |
 | cmd·config | 설정 읽기와 프로그램 시작·조립 | 실행 진입점의 조립 역할. 요청 처리 중 계층 우회 금지 |
-| origin·demo·bench·테스트 | 외부 사용·성능 실험 | demo는 mini-Redis를, bench는 소비 앱·원본 /stats를 HTTP로 호출. CSV 출력은 cmd/bench가 담당하며 코어 직접 호출로 외부 검증을 대체하지 않음 |
+| cmd/demo·cmd/cachebench·테스트 | 외부 사용·성능 실험 | cmd/demo(원본 API·소비 앱)와 cmd/cachebench(성능 측정, CSV 출력)는 mini-Redis를 HTTP로만 호출하며 코어 직접 호출로 외부 검증을 대체하지 않음. 초기 계획의 internal/origin·internal/bench·cmd/bench는 이 둘로 대체됨 |
 
 요청 경로는 **① → ② → ③ 한 방향**이다. 로깅은 생성 시 전달한 표준 로거를 사용한다. Store의 `mu`가 모든 테이블 접근·지연 만료·재해싱을 보호하며 `writeMu`가 변경과 AOF 기록·교체·종료의 순서를 보장한다. 파일 I/O·Sync와 HTTP 본문 읽기·응답 쓰기는 메모리 락 밖에서 수행한다.
 

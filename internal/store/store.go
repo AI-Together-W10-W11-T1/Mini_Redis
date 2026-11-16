@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -116,7 +118,7 @@ func newStore(clock Clock, logger *slog.Logger, maxBytes int64) *Store {
 		clock = systemClock{}
 	}
 	return &Store{
-		table:    hashtable.New(logger),
+		table:    hashtable.NewSeeded(logger, randomSeed()),
 		maxBytes: maxBytes, maintenanceStop: make(chan struct{}), maintenanceDone: make(chan struct{}),
 		clock:           clock,
 		logger:          logger,
@@ -319,22 +321,33 @@ func validateKey(key string) error {
 // Accounting is approximate resident data, not an RSS guarantee. Buckets,
 // allocator/GC overhead, temporary rewrite buffers and goroutines are separate.
 func entryBytes(key string, r hashtable.Record) int64 { return int64(len(key)+len(r.Value)) + 64 }
+
+// putLocked and removeLocked each walk the key's chain once.
 func (s *Store) putLocked(key string, r hashtable.Record) bool {
-	if old, ok := s.table.Get(key); ok {
+	old, updated := s.table.Swap(key, r)
+	if updated {
 		s.usedBytes -= entryBytes(key, old)
 	}
-	updated := s.table.Put(key, r)
 	s.usedBytes += entryBytes(key, r)
 	return updated
 }
 func (s *Store) removeLocked(key string) bool {
-	old, ok := s.table.Get(key)
+	old, ok := s.table.Take(key)
 	if !ok {
-		return false
-	}
-	if !s.table.Delete(key) {
 		return false
 	}
 	s.usedBytes -= entryBytes(key, old)
 	return true
+}
+
+// randomSeed makes bucket placement differ per process, so collisions cannot
+// be prepared in advance. Hashes are never written to the AOF, so a new seed
+// after a restart is harmless. Without a random source the table still works,
+// only with predictable placement.
+func randomSeed() uint64 {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return 0
+	}
+	return binary.LittleEndian.Uint64(raw[:])
 }

@@ -73,24 +73,42 @@ docker stop miniredis
 | `MINI_REDIS_MAX_BODY_BYTES` | `524288` | HTTP 요청 본문 상한 |
 | `MINI_REDIS_AOF` | `true` | `false`는 기존 파일도 읽지 않는 메모리 모드 |
 | `MINI_REDIS_AOF_PATH` | `data/appendonly.aof` | 실행 디렉터리 기준 파일 경로 |
-| `MINI_REDIS_AOF_MAX_BYTES` | `268435456` | AOF 파일+삭제 예약량 상한 |
+| `MINI_REDIS_AOF_MAX_BYTES` | 데이터 상한의 2배 (`536870912`) | AOF 파일+삭제 예약량 상한. 지정하지 않으면 데이터 상한의 2배이며 최소 `268435456` |
 | `MINI_REDIS_AOF_REWRITE_MIN_BYTES` | `4194304` | 최소 재작성 증가량 기준. AOF 상한보다 작아야 함 |
+| `MINI_REDIS_AOF_SYNC_INTERVAL_MS` | `1000` | 디스크 Sync 주기(10~60000). 길수록 장애 시 잃을 수 있는 구간이 늘어남 |
 | `MINI_REDIS_DEBUG` | `false` | 디버그 로그. `-debug` 플래그 우선 |
 
-데이터 상한은 **프로세스 RSS 상한이 아닙니다.** 버킷 배열·런타임·GC·재작성 버퍼 등은 별도 메모리를 사용합니다. 상한에서는 증가하는 쓰기를 거부하며 같은 크기·더 작은 갱신과 삭제를 허용합니다(영속성 장애 등 별도 오류는 제외). 자동 LRU/LFU 축출은 없습니다. 만료 항목은 조회 시와 적응형 백그라운드 정리로 회수하며, 용량 거부 전에도 제한된 동기 회수를 시도합니다.
+데이터 상한은 **프로세스 RSS 상한이 아닙니다.** 버킷 배열·런타임·GC·재작성 버퍼 등은 별도 메모리를 사용합니다. 키가 크게 줄면 만료 정리가 한 바퀴를 마칠 때 버킷 배열도 줄입니다. 상한에서는 증가하는 쓰기를 거부하며 같은 크기·더 작은 갱신과 삭제를 허용합니다(영속성 장애 등 별도 오류는 제외). 자동 LRU/LFU 축출은 없습니다. AOF는 Base64와 삭제 예약 때문에 같은 데이터에 더 많은 공간을 쓰므로, AOF 상한을 데이터 상한의 2배보다 작게 지정하면 데이터 상한에 닿기 전에 쓰기가 `PERSISTENCE_UNAVAILABLE`로 거부될 수 있습니다. 2배는 일반적인 키·값을 위한 기본 정책이며 모든 입력에서 충분함을 보장하지는 않습니다. 만료 항목은 조회 시와 적응형 백그라운드 정리로 회수하며, 용량 거부 전에도 제한된 동기 회수를 시도합니다.
 
 **운영 환경에서는 디버그 로그를 끄세요.** 키 이름과 경로가 기록되며 성능에도 영향을 줍니다. 외부 접속은 Bearer 토큰과 TLS 리버스 프록시를 함께 사용하세요. 내장 TLS·권한별 접근 제어·복제·클러스터는 제공하지 않습니다.
 
+## 캐싱 데모와 성능 비교
+
+원본 API와 소비 앱을 띄워 캐시 적중·미적중을 직접 확인할 수 있습니다. 자세한 내용은 [docs/demo.md](docs/demo.md)에 있습니다.
+
+```bash
+MINI_REDIS_AOF=false go run ./cmd/miniredis   # 터미널 1
+go run ./cmd/demo                             # 터미널 2: 원본 8081, 소비 앱 8082
+curl -si 'http://127.0.0.1:8082/demo/products/42' | grep -i x-cache   # MISS, 다시 호출하면 HIT
+```
+
+캐시 사용·미사용 성능 비교는 `go run ./cmd/cachebench`로 측정합니다. 사용법은 [docs/benchmark.md](docs/benchmark.md), 측정 결과는 [docs/results/prd-t4.md](docs/results/prd-t4.md)를 참고하세요.
+
 ## 영속성과 문서
 
-AOF는 변경을 파일에 기록하고 약 1초마다 Sync합니다. **성공 응답은 디스크 동기화 완료를 뜻하지 않습니다.** 장애 시 마지막 동기화 이후 변경을 잃을 수 있으며 1초는 손실 상한이 아닙니다. 이미 시작한 변경은 503 `PERSISTENCE_OUTCOME_UNKNOWN` 뒤에도 반영될 수 있습니다.
+AOF는 변경을 파일에 기록하고 기본 약 1초마다 Sync합니다. **성공 응답은 디스크 동기화 완료를 뜻하지 않습니다.** 장애 시 마지막 동기화 이후 변경을 잃을 수 있으며 Sync 주기는 손실 상한이 아닙니다. 이미 시작한 변경은 503 `PERSISTENCE_OUTCOME_UNKNOWN` 뒤에도 반영될 수 있습니다.
 
 - [API·오류 코드](docs/api.md)
 - [영속성 보장·백업·손상 복구](docs/persistence.md)
 - [구조·동시성·만료·메모리 정책](docs/architecture.md)
 - [Docker·systemd·TLS 배포](docs/deployment.md)
 - [캐시 연동 방법과 경합 한계](docs/cache-aside.md)
-- [학습·검수 이력](docs/learning/README.md)
+- [캐싱 데모: 원본 API와 소비 앱](docs/demo.md)
+- [성능 측정 방법](docs/benchmark.md)과 [측정 결과](docs/results/prd-t4.md)
+- [설계 선택과 이유](docs/design-decisions.md)
+- [검증 케이스 대응표](docs/verification.md)
+
+과제 PRD와 단계별 학습·검수 기록은 [docs/learning](docs/learning/README.md)에 따로 보존합니다. 현재 동작의 기준은 위 문서들입니다.
 
 ## 개발
 
@@ -101,4 +119,4 @@ go vet ./...
 gofmt -l .
 ```
 
-성능 수치는 아직 공개하지 않았습니다. [MIT 라이선스](LICENSE)를 사용합니다.
+[MIT 라이선스](LICENSE)를 사용합니다.

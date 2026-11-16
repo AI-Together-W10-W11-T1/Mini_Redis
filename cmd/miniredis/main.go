@@ -39,11 +39,18 @@ func run() error {
 		level = slog.LevelDebug
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	if cfg.AOFLimitTooSmall() {
+		logger.Warn("AOF_LIMIT_BELOW_DATA_LIMIT", "aof_max_bytes", cfg.AOFMaxBytes, "max_data_bytes", cfg.MaxDataBytes,
+			"hint", "writes may fail with PERSISTENCE_UNAVAILABLE before the data limit; use at least twice the data limit")
+	}
 	var s *store.Store
 	if cfg.AOFEnabled {
 		opts := store.DefaultAOFOptions(cfg.AOFPath)
 		opts.MaxBytes = cfg.AOFMaxBytes
 		opts.RewriteMinBytes = cfg.AOFRewriteMinBytes
+		opts.SyncInterval = cfg.AOFSyncInterval
+		// 미동기화 기록이 Sync 주기 세 번을 넘게 밀리면 변경을 거부한다(기본 주기에서는 3초).
+		opts.MaxUnsyncedAge = 3 * cfg.AOFSyncInterval
 		s, err = store.OpenPersistentWithLimit(nil, logger, opts, cfg.MaxDataBytes)
 		if err != nil {
 			return fmt.Errorf("open AOF: %w", err)

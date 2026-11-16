@@ -159,17 +159,7 @@ func (h *Handler) ServeKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Set(w http.ResponseWriter, r *http.Request) {
-	// 실제 수신량을 먼저 제한하고 끝의 공백까지 본문 전체를 확인한다.
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBodyBytes))
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			h.writeError(w, 413, "LIMIT_EXCEEDED", "본문 크기 상한을 초과했습니다.")
-		} else {
-			h.writeError(w, 400, "INVALID_ARGUMENT", "본문을 읽지 못했습니다.")
-		}
-		return
-	}
+	// 헤더만으로 거부할 수 있는 요청은 본문을 읽기 전에 거부한다.
 	if values, present := r.Header["Content-Type"]; present {
 		if len(values) != 1 {
 			h.writeError(w, 415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type이 올바르지 않습니다.")
@@ -181,6 +171,17 @@ func (h *Handler) Set(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, 415, "UNSUPPORTED_MEDIA_TYPE", "application/json을 지정해야 합니다.")
 			return
 		}
+	}
+	// 실제 수신량을 먼저 제한하고 끝의 공백까지 본문 전체를 확인한다.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBodyBytes))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			h.writeError(w, 413, "LIMIT_EXCEEDED", "본문 크기 상한을 초과했습니다.")
+		} else {
+			h.writeError(w, 400, "INVALID_ARGUMENT", "본문을 읽지 못했습니다.")
+		}
+		return
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {

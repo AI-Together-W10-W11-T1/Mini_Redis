@@ -200,7 +200,10 @@ func newScenario(t *testing.T) *cacheScenario {
 	}}
 	o := httptest.NewServer(origin)
 	t.Cleanup(o.Close)
-	redis := httptest.NewServer(httpapi.NewHandler(store.New(clock, nil), nil))
+	cache := store.New(clock, nil)
+	// Store는 만료 정리 고루틴을 갖고 있으므로 HTTP 서버와 함께 닫는다.
+	t.Cleanup(func() { _ = cache.Close() })
+	redis := httptest.NewServer(httpapi.NewHandler(cache, nil))
 	t.Cleanup(redis.Close)
 	app := httptest.NewServer(consumerFixture(client, o.URL, redis.URL, 100))
 	t.Cleanup(app.Close)

@@ -199,3 +199,14 @@ AOF on 실행에서는 도구가 AOF 파일을 밖에서 50ms 간격으로 관�
 - 브라우저·IDE 빌드·동기화 앱 등 다른 부하 종료
 - 첫 실행은 `-quick`으로 실패 0건·무효 0회인지 확인한 뒤 본 측정
 - 비교하려는 두 측정은 같은 `source_hash`·같은 기기·같은 옵션인지 확인
+
+## 팀 PRD T4 기본 프로필로 측정하기
+
+팀 PRD의 기본 프로필(원본 100ms, 사용자 20, 워밍업 10초, 측정 30초, 3회, 영속성 비활성)은 다음 명령입니다. 약 4분 걸립니다.
+
+```bash
+go run ./cmd/cachebench -scenarios warm -delays 100 -concurrency 20 \
+  -warmup 10s -duration 30s -repeats 3 -aof off -products 100
+```
+
+이 프로필의 결과와 해석은 [docs/results/prd-t4.md](results/prd-t4.md)에 정리합니다. 기기를 바꿔 다시 측정했다면 `bench-results/<실행 ID>/`의 파일로 그 문서와 `docs/results/` 아래 원자료를 갱신하세요.

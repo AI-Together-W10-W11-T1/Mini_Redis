@@ -21,3 +21,4 @@
 *.aof
 *.aof.lock
 /aofrepair
+/bench-results/

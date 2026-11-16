@@ -1,0 +1,24 @@
+# Executables and build outputs
+/bin/
+*.exe
+*.test
+/miniredis
+/origin
+/demo
+/bench
+
+# Test coverage and profiling outputs
+*.out
+
+# macOS metadata
+.DS_Store
+
+# Local persistence files
+/data/
+
+# Release artifacts and persistence outside the default data directory
+/dist/
+*.aof
+*.aof.lock
+/aofrepair
+/bench-results/

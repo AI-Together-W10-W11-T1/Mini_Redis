@@ -1,0 +1,70 @@
+{
+  "env": {
+    "commit": "6d0b1b3af619-dirty",
+    "source_hash": "c27c7f036438",
+    "go_version": "go1.24.7",
+    "os_arch": "linux/amd64",
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "num_cpu": 4,
+    "gomaxprocs": 4,
+    "server_mode": "spawn",
+    "auth": true,
+    "label": "PRD T4 기본 프로필, Linux 4코어 컨테이너 참고 측정",
+    "topology": "same-host loopback: CLI + origin (in CLI process) + mini-Redis share one machine's CPU",
+    "origin_model": "in-process HTTP origin, immutable catalog, lock-free, artificial time.Sleep delay",
+    "server_build": "built by cachebench from this source tree (source_hash)",
+    "server_config": "set by cachebench: debug off, fresh process and empty AOF per run",
+    "server_binary": {
+      "sha256": "87759d55431557e84de4cd4cbe1ad5bc817d237fb318b4ddea135e154f3437a9",
+      "go_version": "go1.24.7",
+      "module": "github.com/AI-Together-W10-W11-T1/Mini_Redis",
+      "build_settings": {
+        "-buildmode": "exe",
+        "-compiler": "gc",
+        "CGO_CFLAGS": "",
+        "CGO_CPPFLAGS": "",
+        "CGO_CXXFLAGS": "",
+        "CGO_ENABLED": "1",
+        "CGO_LDFLAGS": "",
+        "DefaultGODEBUG": "asynctimerchan=1,gotestjsonbuildtext=1,gotypesalias=0,httpservecontentkeepheaders=1,multipathtcp=0,randseednop=0,rsa1024min=0,tls3des=1,tlsmlkem=0,winreadlinkvolume=0,winsymlink=0,x509keypairleaf=0,x509negativeserial=1,x509rsacrt=0,x509usepolicies=0",
+        "GOAMD64": "v1",
+        "GOARCH": "amd64",
+        "GOOS": "linux",
+        "vcs": "git",
+        "vcs.modified": "true",
+        "vcs.revision": "6d0b1b3af6198b32280cb054171391b00ff97de9",
+        "vcs.time": "2026-11-16T08:10:24Z"
+      }
+    }
+  },
+  "plan": {
+    "scenarios": [
+      "warm"
+    ],
+    "cache": [
+      "off",
+      "on"
+    ],
+    "aof": [
+      "off"
+    ],
+    "origin_delays_ms": [
+      100
+    ],
+    "concurrency": [
+      20
+    ],
+    "repeats": 3,
+    "products": 100,
+    "value_bytes": 1024,
+    "warmup": "10s",
+    "duration": "30s",
+    "write_duration": "10s",
+    "cold_keys": 1000,
+    "stampede_keys": 500,
+    "stampede_requests_per_key": 2,
+    "request_timeout": "5s",
+    "seed": 1
+  },
+  "session": "20261116-084312-b834f5"
+}

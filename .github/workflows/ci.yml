@@ -1,0 +1,49 @@
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go: ['1.22.x', stable]
+        # Go 1.22로 만든 레이스 테스트 바이너리는 최신 macOS 러너에서
+        # "missing LC_UUID load command"로 실행 전에 중단된다.
+        # 최소 버전(1.22) 호환은 Linux에서, macOS는 stable에서 확인한다.
+        exclude:
+          - os: macos-latest
+            go: '1.22.x'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: GOOS=windows GOARCH=amd64 go build ./...
+      - run: GOOS=linux GOARCH=amd64 go build ./...
+      - run: GOOS=darwin GOARCH=arm64 go build ./...
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t mini-redis:ci .
+      - name: Verify authentication guard, health and clean shutdown
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'docker rm -fv mini-redis-guard mini-redis-smoke 2>/dev/null || true' EXIT
+          docker run --name mini-redis-guard mini-redis:ci && exit 1 || test "$(docker inspect -f '{{.State.ExitCode}}' mini-redis-guard)" = 1
+          docker run -d --name mini-redis-smoke -e MINI_REDIS_AUTH_TOKEN=ci-only-token-0123456789 mini-redis:ci
+          for i in $(seq 1 30); do
+            if docker exec mini-redis-smoke wget -qO- http://127.0.0.1:8080/health; then break; fi
+            sleep 1
+          done
+          docker exec mini-redis-smoke wget -qO- http://127.0.0.1:8080/health
+          docker stop mini-redis-smoke
+          test "$(docker inspect -f '{{.State.ExitCode}}' mini-redis-smoke)" = 0

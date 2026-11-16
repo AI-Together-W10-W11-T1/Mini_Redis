@@ -6,23 +6,28 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
-	"mini-redis/internal/hashtable"
+	"github.com/AI-Together-W10-W11-T1/Mini_Redis/internal/hashtable"
 )
 
 const (
-	MaxKeyBytes   = 256
-	MaxValueBytes = 65_536
-	MaxTTLMillis  = int64(1<<63-1) / int64(time.Millisecond)
+	DefaultMaxDataBytes int64 = 256 << 20
+	MaxKeyBytes               = 256
+	MaxValueBytes             = 65_536
+	MaxTTLMillis              = int64(1<<63-1) / int64(time.Millisecond)
 )
 
 // 호출자가 HTTP에 의존하지 않고 처리할 수 있도록 입력 오류를 종류로 구분한다.
 var (
-	ErrInvalidArgument = errors.New("invalid argument")
-	ErrLimitExceeded   = errors.New("limit exceeded")
+	ErrCapacityExceeded = errors.New("capacity exceeded")
+	ErrInvalidArgument  = errors.New("invalid argument")
+	ErrLimitExceeded    = errors.New("limit exceeded")
+	ErrPersistence      = errors.New("persistence unavailable")
+	ErrOutcomeUnknown   = fmt.Errorf("%w: outcome unknown", ErrPersistence)
 )
 
 // Clock lets tests advance time without sleeping. Implementations must be safe
@@ -75,28 +80,59 @@ type DeleteResult struct {
 // 재확인 로직이 필요하다. 단일 Mutex는 이 규칙을 단순하게 보장한다.
 // 성능상 충분한지는 실제 요청 부하로 별도 측정한다.
 type Store struct {
-	mu           sync.Mutex
-	table        *hashtable.Table
-	clock        Clock
-	logger       *slog.Logger
-	debugEnabled bool
+	writeMu                          mutationGate // Serializes journal order, writes, rewrite cutover and close.
+	mu                               sync.Mutex
+	table                            *hashtable.Table
+	clock                            Clock
+	logger                           *slog.Logger
+	debugEnabled                     bool
+	aof                              *journal
+	mutationTimeout                  time.Duration
+	mutationFailed                   atomic.Bool
+	maxBytes, usedBytes              int64
+	sweepCursor                      hashtable.ScanCursor
+	maintenanceStop, maintenanceDone chan struct{}
+	maintenanceOnce                  sync.Once
+	closed                           atomic.Bool
 }
 
 // New uses the real clock when clock is nil. Debug settings are fixed here.
+// It starts expiration maintenance; the owner must call Close.
 func New(clock Clock, logger *slog.Logger) *Store {
+	return NewWithLimit(clock, logger, DefaultMaxDataBytes)
+}
+
+func NewWithLimit(clock Clock, logger *slog.Logger, maxBytes int64) *Store {
+	s := newStore(clock, logger, maxBytes)
+	go s.expirationLoop()
+	return s
+}
+
+func newStore(clock Clock, logger *slog.Logger, maxBytes int64) *Store {
+	if maxBytes <= 0 {
+		panic("data limit must be positive")
+	}
 	if clock == nil {
 		clock = systemClock{}
 	}
 	return &Store{
-		table:        hashtable.New(logger),
-		clock:        clock,
-		logger:       logger,
-		debugEnabled: logger != nil && logger.Enabled(context.Background(), slog.LevelDebug),
+		table:    hashtable.New(logger),
+		maxBytes: maxBytes, maintenanceStop: make(chan struct{}), maintenanceDone: make(chan struct{}),
+		clock:           clock,
+		logger:          logger,
+		debugEnabled:    logger != nil && logger.Enabled(context.Background(), slog.LevelDebug),
+		mutationTimeout: defaultMutationTimeout,
 	}
 }
 
 // Set replaces both the value and expiry. A nil TTL removes any previous expiry.
 func (s *Store) Set(key string, value string, ttlMillis *int64) error {
+	return s.SetContext(context.Background(), key, value, ttlMillis)
+}
+
+// SetContext cancels admission/waiting, not an already-started disk syscall.
+// An error after admission may have an unknown outcome; do not blindly retry.
+func (s *Store) SetContext(ctx context.Context, key string, value string, ttlMillis *int64) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
@@ -111,24 +147,58 @@ func (s *Store) Set(key string, value string, ttlMillis *int64) error {
 		}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// 락을 얻은 뒤 시간을 읽어, 락 대기 시간이 새 TTL을 줄이지 않게 한다.
-	now := s.clock.Now()
-	record := hashtable.Record{Value: value}
-	if ttlMillis != nil {
-		record.ExpiresAt = now.Add(time.Duration(ttl) * time.Millisecond)
-	}
-	updated := s.table.Put(key, record)
-	if s.debugEnabled {
-		ttlForLog := int64(-1)
-		if ttlMillis != nil {
-			ttlForLog = ttl
+	hasTTL := ttlMillis != nil
+	return s.runMutation(ctx, func() error {
+		prepare := func() (hashtable.Record, bool, error) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			now := s.clock.Now()
+			r := hashtable.Record{Value: value}
+			if hasTTL {
+				r.ExpiresAt = now.Add(time.Duration(ttl) * time.Millisecond)
+			}
+			old, found := s.table.Get(key)
+			delta := entryBytes(key, r)
+			if found {
+				delta -= entryBytes(key, old)
+			}
+			if delta > 0 && delta > s.maxBytes-s.usedBytes {
+				return r, found, ErrCapacityExceeded
+			}
+			return r, found, nil
 		}
-		s.logger.Debug("SET", "key", key, "updated", updated,
-			"unlimited", ttlMillis == nil, "ttl_ms", ttlForLog, "size", s.table.Len())
-	}
-	return nil
+		record, found, capacityErr := prepare()
+		if capacityErr != nil {
+			// runMutation already owns writeMu. Do not recursively acquire it.
+			// Re-read the old entry afterwards: reclamation may remove this key.
+			s.reclaimExpiredHeld(4096)
+			record, found, capacityErr = prepare()
+		}
+		if capacityErr != nil {
+			return capacityErr
+		}
+		if s.aof != nil {
+			reserve := int64(0)
+			if !found {
+				reserve = deleteRecordBytes(key)
+			}
+			if err := s.aof.append(recordForSet(key, record), reserve); err != nil {
+				return err
+			}
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		updated := s.putLocked(key, record)
+		if s.debugEnabled {
+			ttlForLog := int64(-1)
+			if hasTTL {
+				ttlForLog = ttl
+			}
+			s.logger.Debug("SET", "key", key, "updated", updated,
+				"unlimited", !hasTTL, "ttl_ms", ttlForLog, "size", s.table.Len())
+		}
+		return nil
+	})
 }
 
 func (s *Store) Get(key string) (LookupResult, error) {
@@ -141,21 +211,56 @@ func (s *Store) Get(key string) (LookupResult, error) {
 }
 
 func (s *Store) Delete(key string) (DeleteResult, error) {
+	return s.DeleteContext(context.Background(), key)
+}
+
+// DeleteContext has the same uncertain-outcome rules as SetContext.
+func (s *Store) DeleteContext(ctx context.Context, key string) (DeleteResult, error) {
 	if err := validateKey(key); err != nil {
 		return DeleteResult{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	lookup := s.lookupLocked(key, s.clock.Now(), "delete")
-	result := DeleteResult{State: lookup.State}
-	if lookup.State == Live {
-		result.Deleted = s.table.Delete(key)
+	// Result travels through the completion channel; do not share a result
+	// pointer with a worker that may outlive the caller's timeout.
+	result := make(chan DeleteResult, 1)
+	err := s.runMutation(ctx, func() error {
+		if s.aof != nil {
+			if err := s.aof.health(); err != nil {
+				return err
+			}
+		}
+		lookup := func() LookupResult {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return s.lookupLocked(key, s.clock.Now(), "delete")
+		}()
+		deleted := DeleteResult{State: lookup.State}
+		if lookup.State == Live {
+			if s.aof != nil {
+				if err := s.aof.append(aofRecord{Op: "del", Key: key}, -deleteRecordBytes(key)); err != nil {
+					return err
+				}
+			}
+			func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				s.removeLocked(key)
+			}()
+			deleted.Deleted = true
+		}
+		if s.debugEnabled {
+			func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				s.logger.Debug("STORE_DELETE", "key", key, "state", deleted.State.String(), "deleted", deleted.Deleted, "size", s.table.Len())
+			}()
+		}
+		result <- deleted
+		return nil
+	})
+	if err != nil {
+		return DeleteResult{}, err
 	}
-	if s.debugEnabled {
-		s.logger.Debug("STORE_DELETE", "key", key, "state", result.State.String(),
-			"deleted", result.Deleted, "size", s.table.Len())
-	}
-	return result, nil
+	return <-result, nil
 }
 
 // lookupLocked must only run with mu held. Reads may physically remove expiry.
@@ -169,7 +274,7 @@ func (s *Store) lookupLocked(key string, now time.Time, op string) LookupResult 
 			result = LookupResult{State: Live, Value: record.Value, TTLMillis: -1}
 		case !now.Before(record.ExpiresAt):
 			// 만료 정각도 만료다. 같은 락 안에서 확인과 삭제를 끝낸다.
-			s.table.Delete(key)
+			s.removeLocked(key)
 			result.State = Expired
 			cleaned = true
 		default:
@@ -209,4 +314,27 @@ func validateKey(key string) error {
 		}
 	}
 	return nil
+}
+
+// Accounting is approximate resident data, not an RSS guarantee. Buckets,
+// allocator/GC overhead, temporary rewrite buffers and goroutines are separate.
+func entryBytes(key string, r hashtable.Record) int64 { return int64(len(key)+len(r.Value)) + 64 }
+func (s *Store) putLocked(key string, r hashtable.Record) bool {
+	if old, ok := s.table.Get(key); ok {
+		s.usedBytes -= entryBytes(key, old)
+	}
+	updated := s.table.Put(key, r)
+	s.usedBytes += entryBytes(key, r)
+	return updated
+}
+func (s *Store) removeLocked(key string) bool {
+	old, ok := s.table.Get(key)
+	if !ok {
+		return false
+	}
+	if !s.table.Delete(key) {
+		return false
+	}
+	s.usedBytes -= entryBytes(key, old)
+	return true
 }

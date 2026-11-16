@@ -1,5 +1,7 @@
 # Mini Redis 구현 설계
 
+2026-11-16 사용자 요청으로 D7을 AOF + 1초 주기 Sync로 변경했다. 상세 계약은 `docs/step4-persistence.md`를 따른다.
+
 기준은 인터뷰 종료 후 확정한 **0단계 D1~D11 결정표**와 이후 사용자가 명시한 수정 사항이다. 로컬 Go 최소 1.22, 성능 측정 3초·10초·1회를 기준으로 한다. **설정 가능한 디버그 로그, GET의 남은 TTL 반환, 단계별 실행·학습 실험·테스트 제공**을 함께 반영한다. 이 문서의 시그니처는 계층 간 인터페이스 계약이다.
 
 ## 1. 디렉터리 구조·책임·의존 방향
@@ -9,6 +11,7 @@
 ```text
 docs/design.md                  설계·계약·승인 기준
 cmd/miniredis/                  서버 시작, 설정 읽기, 의존성 조립
+cmd/aofrepair/                  정지한 AOF 검사·정상 구간을 새 파일로 복구
 cmd/origin/                     성능 비교용 느린 원본 API 실행
 cmd/demo/                       캐시 사용·미사용을 선택하는 소비 앱 실행
 cmd/bench/                      부하 실행·통계 집계·CSV 출력 진입점
@@ -27,12 +30,12 @@ docs/results/                  성능 측정 CSV·실행 환경·결과 해석
 | 구분 | 책임 | 의존 제한 |
 |---|---|---|
 | ① httpapi | 경로·메서드·JSON 해석, 응답·오류 변환 | store를 호출. hashtable 직접 접근 금지 |
-| ② store | 문자열 제한 검증, 전체 연산 락, 만료·덮어쓰기·삭제 정책 | hashtable과 자신이 정의한 Clock 사용. HTTP 의존 금지 |
+| ② store | 입력 검증, 메모리 락·변경 순서 락, TTL·삭제·AOF | hashtable과 자신이 정의한 Clock 사용. HTTP 의존 금지 |
 | ③ hashtable | FNV-1a 64비트, 체이닝, 키 비교, 개수·확장 | 표준 라이브러리만 사용. store·HTTP 역참조와 TTL 판단 금지 |
 | cmd·config | 설정 읽기와 프로그램 시작·조립 | 실행 진입점의 조립 역할. 요청 처리 중 계층 우회 금지 |
 | origin·demo·bench·테스트 | 외부 사용·성능 실험 | demo는 mini-Redis를, bench는 소비 앱·원본 /stats를 HTTP로 호출. CSV 출력은 cmd/bench가 담당하며 코어 직접 호출로 외부 검증을 대체하지 않음 |
 
-요청 경로는 **① → ② → ③ 한 방향**이다. 로깅은 생성 시 전달한 표준 로거를 사용하며 역방향 의존을 만들지 않는다. 해시 테이블 자체에는 락을 두지 않고 store 하나의 `sync.Mutex`가 조회·저장·삭제·지연 만료·재해싱을 모두 보호한다. HTTP 본문 읽기와 응답 쓰기는 이 락 밖에서 한다.
+요청 경로는 **① → ② → ③ 한 방향**이다. 로깅은 생성 시 전달한 표준 로거를 사용한다. Store의 `mu`가 모든 테이블 접근·지연 만료·재해싱을 보호하며 `writeMu`가 변경과 AOF 기록·교체·종료의 순서를 보장한다. 파일 I/O·Sync와 HTTP 본문 읽기·응답 쓰기는 메모리 락 밖에서 수행한다.
 
 해시 테이블·저장 규칙·HTTP·설정·측정 집계 테스트는 각각의 패키지 안에 둔다. 외부 캐시 기능 테스트는 `internal/demo/demo_test.go`에서 세 테스트 서버를 연결한다. 별도 최상위 테스트 디렉터리는 만들지 않고 성능 결과는 `docs/results/`에 둔다.
 
@@ -51,6 +54,8 @@ docs/results/                  성능 측정 CSV·실행 환경·결과 해석
 | `(*Table).Delete(key string) bool` | 물리 항목 삭제 여부. 없으면 false·개수 불변 |
 | `(*Table).Len() int` | 아직 정리하지 않은 만료 항목도 포함한 물리 키 수 |
 | `(*Table).Capacity() int` | 현재 버킷 수 |
+| `(*Table).Range(visit func(string, Record) bool)` | 레코드 복사본 순회. 호출자가 접근을 잠그며 콜백 안에서 테이블 변경 금지 |
+| `(*Table).Scan(cursor *ScanCursor, budget int, visit func(string, Record)) bool` | 버킷 탐색+노드 방문을 예산만큼 수행. 전체 스캔 중 삽입·갱신·확장은 금지하며 배치 사이 만료 삭제만 허용 |
 | `(*Table).resize(newCapacity int)` | 비공개 함수. 값·만료 시각·키 수를 보존해 재배치 |
 
 새 키 삽입으로 적재율이 0.75를 초과하면 2배 일괄 확장한다. 기존 키 갱신으로 확장하거나 키 수를 늘리지 않는다. 해시값이 같아도 실제 키를 비교한다. 내부 Entry·next 포인터는 외부에 반환하지 않는다. 동시성 보호는 호출자인 store의 책임이다.
@@ -60,10 +65,16 @@ docs/results/                  성능 측정 CSV·실행 환경·결과 해석
 | 시그니처 | 계약 |
 |---|---|
 | `Clock.Now() time.Time` | store에 정의하는 시계 인터페이스의 유일한 메서드. 실제 시계·가짜 시계 교체 가능 |
-| `New(clock Clock, logger *slog.Logger) *Store` | Store가 자기 Table과 전역 락을 소유. 생성 후 같은 인스턴스를 모든 요청에 공유 |
+| `New(clock Clock, logger *slog.Logger) *Store` | Store가 자기 Table·메모리 락·변경 순서 락을 소유. 같은 인스턴스를 모든 요청에 공유 |
+| `OpenPersistent(clock Clock, logger *slog.Logger, opts AOFOptions) (*Store, error)` | 파일 잠금·복구 후 주기 Sync 시작. 기존 New는 메모리 전용 |
+| `(*Store).Close() error` | 백그라운드 작업 종료·최종 Sync·파일 잠금 해제 |
+| `(*Store).RewriteAOF() error` | 유효 항목과 동시 변경분을 새 파일로 기록 후 교체 |
+| `(*Store).PersistenceStatus() AOFStatus` | 파일 크기·기록/Sync 순번·재작성·오류. HTTP 관리 API 없음 |
 | `(*Store).Set(key string, value string, ttlMillis *int64) error` | nil이면 무기한. 입력 오류는 변경 전 거부. 값·만료 시각 함께 교체 |
+| `(*Store).SetContext(ctx context.Context, key string, value string, ttlMillis *int64) error` | 요청 취소·기한 전달. 영속성 변경 결과 대기는 기본 3초. 시작한 I/O는 기한 후 완료될 수 있음 |
 | `(*Store).Get(key string) (LookupResult, error)` | 입력 오류만 error. 유효·없음·만료는 LookupResult.State로 구분 |
 | `(*Store).Delete(key string) (DeleteResult, error)` | 유효 키면 Deleted=true. 없음·만료면 false. 발견한 만료 항목은 물리 삭제 |
+| `(*Store).DeleteContext(ctx context.Context, key string) (DeleteResult, error)` | 취소·대기 제한 적용. 결과 불명 시 error이며 자동 재시도 금지 |
 
 | 결과 타입의 필드 | 의미 |
 |---|---|
@@ -75,7 +86,7 @@ docs/results/                  성능 측정 CSV·실행 환경·결과 해석
 
 **없음·만료 구분:** 내부에서는 로그·테스트를 위해 구분하지만 HTTP 조회는 같은 404다. 만료 정리 후 다시 조회하면 Missing이므로 과거 만료 이력을 계속 저장하지 않는다.
 
-입력 규칙 검증은 공유 상태를 변경하기 전에 수행한다. 유효 입력은 락을 얻은 뒤 Clock.Now를 읽고 판단·변경한다. SET이 만료 항목을 덮어쓰면 새 값·새 TTL 또는 무기한 상태로 교체한다. 별도 정리 작업·타이머는 만들지 않는다. 가짜 시계는 테스트에서만 시간을 전진시키며 동시성 테스트에서도 시간 접근을 안전하게 처리한다.
+입력 규칙 검증은 공유 상태 변경 전에 수행한다. 유효 입력은 락 획득 후 Clock.Now를 읽고 판단하며 영속성 모드는 AOF 추가 기록 성공 후 메모리를 변경한다. SET은 값·TTL을 함께 교체한다. TTL용 주기적 정리 작업은 만들지 않는다. AOF는 별도 주기 Sync·재작성 작업을 사용한다. 가짜 시계는 테스트에서 시간을 전진시키며 동시 접근도 보호한다.
 
 ### ① 요청 처리
 
@@ -107,7 +118,7 @@ Clock·해시·기록 구조는 HTTP에 노출하지 않는다. JSON의 ttl_ms �
 
 GET의 남은 TTL은 **락 안에서 읽은 동일한 현재 시각**으로 값과 함께 계산한다. 무기한은 -1, 유효 TTL은 남은 기간을 밀리초로 올림해 최소 1을 반환한다. 예: 0.4ms 남았으면 1, 정확히 만료됐으면 404. 올림 계산 자체의 정수 오버플로도 피한다. 응답 수신 시점까지 TTL이 그대로 유지된다는 뜻은 아니다.
 
-TTL은 양의 정수 밀리초이며, Go time.Duration으로 안전하게 변환 가능한 최대값 **9,223,372,036,854ms**까지만 수용한다. 이 값은 상품 정책이 아니라 정수 표현 한계다. 범위 확인 후 밀리초→나노초 변환을 하며 큰 JSON 숫자를 float64로 먼저 반올림하지 않는다. 영속성은 없으므로 Record를 파일에 저장하거나 재시작 후 복구하지 않는다.
+TTL은 양의 정수 밀리초이며 Go time.Duration으로 안전하게 변환 가능한 최대값 **9,223,372,036,854ms**까지만 수용한다. 범위 확인 후 나노초로 변환하고 JSON 숫자를 float64로 먼저 반올림하지 않는다. AOF에는 절대 만료 시각을 기록하며 재시작 시 남은 기간을 현재 단조 시계에 연결한다. 중단 중 만료된 값은 복원하지 않는다.
 
 ## 4. HTTP API·키 위치·JSON 예시
 
@@ -190,6 +201,8 @@ on의 흐름은 캐시 GET → 404면 원본 GET → 성공 상품을 JSON 문�
 | 알려진 키 경로의 미지원 메서드 | 405 | METHOD_NOT_ALLOWED | 유지·Allow는 정확히 GET, PUT, DELETE |
 | PUT에서 다른 미디어 타입을 명시하거나 잘못된 Content-Type을 명시 | 415 | UNSUPPORTED_MEDIA_TYPE | 유지 |
 | 처리 가능한 예기치 않은 내부 실패 | 500 | INTERNAL_ERROR | 내부 오류 로그 기록, 성공으로 응답하지 않음 |
+| AOF 기록·Sync 실패, 실행 전 대기 취소·파일 상한, 종료 후 변경 | 503 | PERSISTENCE_UNAVAILABLE | 현재 요청의 메모리 반영을 확인하지 못했거나 변경을 수락하지 않음. 앞선 미동기화 변경 유실 가능 |
+| 실행 중 기한 초과·취소, 변경 작업 panic | 503 | PERSISTENCE_OUTCOME_UNKNOWN | 반영 여부 불명. 나중에 반영될 수 있으므로 조회로 확인하고 무조건 재시도하지 않음 |
 
 정확히 256바이트 키·65,536바이트 값은 허용한다. **Content-Type 헤더가 없으면 JSON으로 간주**하고, application/json의 charset=utf-8 매개변수도 허용한다. text/plain 등 다른 타입을 명시했을 때만 415이며, JSON으로 간주한 본문이 잘못됐으면 400이다. 이 정책은 JSON 본문을 받는 원본 PUT에도 적용한다. 요청 크기·Content-Type·JSON 구문·필드 타입을 확인한 뒤 저장 규칙 검증으로 진행한다. JSON 숫자는 소수 부분이 없는 정수 값인지 확인한다. 하나의 본문에 JSON 값이 여러 개 이어지면 400이다.
 
@@ -208,7 +221,9 @@ on의 흐름은 캐시 GET → 404면 원본 GET → 성공 상품을 JSON 문�
 | ReadTimeout | 5초. 요청 읽기 |
 | WriteTimeout | 5초. 응답 쓰기 |
 | IdleTimeout | 60초. 재사용 연결의 대기 |
-| 종료 대기 | 5초. 새 요청 수락 중단 후 진행 요청 종료 대기. 종료 시 데이터는 보존하지 않음 |
+| 종료 대기 | HTTP 요청 종료·AOF 최종 Sync를 합쳐 5초. 초과 시 오류 종료 |
+| AOF | MINI_REDIS_AOF=true, MINI_REDIS_AOF_PATH=data/appendonly.aof. false는 파일을 읽거나 변경하지 않는 메모리 전용 |
+| AOF 비용 제한 | 1초 Sync, 미동기화 3초 초과 시 변경 거부. 별도로 영속성 변경 결과 대기를 3초로 제한. MINI_REDIS_AOF_MAX_BYTES=268435456은 파일+DEL 예약량 한도. MINI_REDIS_AOF_REWRITE_MIN_BYTES=4194304. 변경분 버퍼 최대 8 MiB |
 | 성능 실험 | 원본 127.0.0.1:8081, 소비 앱 127.0.0.1:8082. 지연·주소·데모 TTL은 실험 설정으로 전달 |
 | 소비 앱 HTTP 클라이언트 | 공유 클라이언트·Transport 재사용. MaxIdleConnsPerHost를 동시 요청 수 이상으로 설정, 기본 20 이상 |
 | bench HTTP 클라이언트 | 공유 클라이언트·Transport 재사용. MaxIdleConnsPerHost를 `-concurrency` 이상으로 설정 |

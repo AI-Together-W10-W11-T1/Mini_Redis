@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"mini-redis/internal/store"
+	"github.com/AI-Together-W10-W11-T1/Mini_Redis/internal/store"
 )
 
 const DefaultMaxBodyBytes int64 = 512 * 1024
@@ -24,6 +26,7 @@ type Handler struct {
 	mux          *http.ServeMux
 	maxBodyBytes int64
 	debugEnabled bool
+	authToken    string
 }
 
 type errorResponse struct {
@@ -39,12 +42,27 @@ func NewHandler(s *store.Store, logger *slog.Logger) http.Handler {
 
 // NewHandlerWithMaxBodyBytes keeps the default constructor's API unchanged
 // while allowing the server to apply the validated body-limit setting.
+type Options struct {
+	MaxBodyBytes int64
+	AuthToken    string
+}
+
 func NewHandlerWithMaxBodyBytes(s *store.Store, logger *slog.Logger, limit int64) http.Handler {
+	return NewHandlerWithOptions(s, logger, Options{MaxBodyBytes: limit})
+}
+func NewHandlerWithOptions(s *store.Store, logger *slog.Logger, opts Options) http.Handler {
+	limit := opts.MaxBodyBytes
+	if limit == 0 {
+		limit = DefaultMaxBodyBytes
+	}
+	if opts.AuthToken != "" && len(opts.AuthToken) < 16 {
+		panic("auth token must contain at least 16 bytes")
+	}
 	if limit <= 0 {
 		panic("HTTP body limit must be positive")
 	}
 	h := &Handler{
-		store: s, logger: logger, mux: http.NewServeMux(), maxBodyBytes: limit,
+		authToken: opts.AuthToken, store: s, logger: logger, mux: http.NewServeMux(), maxBodyBytes: limit,
 		debugEnabled: logger != nil && logger.Enabled(context.Background(), slog.LevelDebug),
 	}
 	h.mux.HandleFunc("/keys/{key}", h.ServeKey)
@@ -88,6 +106,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 	// ServeMux가 점 경로를 정리하기 전에 원래의 경로 구간을 확인한다.
 	path := r.URL.EscapedPath()
+	if path == "/health" {
+		h.health(w, r)
+		return
+	}
+	if h.authToken != "" && (path == "/keys" || strings.HasPrefix(path, "/keys/")) {
+		// Compare fixed-size hashes so token length does not affect comparison time.
+		auth := r.Header.Get("Authorization")
+		validScheme := len(auth) >= 7 && strings.EqualFold(auth[:7], "Bearer ")
+		supplied := ""
+		if validScheme {
+			supplied = auth[7:]
+		}
+		got, want := sha256.Sum256([]byte(supplied)), sha256.Sum256([]byte(h.authToken))
+		if !validScheme || subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			h.writeError(w, 401, "UNAUTHORIZED", "유효한 Bearer 인증 토큰이 필요합니다.")
+			return
+		}
+	}
 	if path != "/keys" && path != "/keys/" {
 		segment, ok := strings.CutPrefix(path, "/keys/")
 		if !ok || segment == "" || strings.Contains(segment, "/") {
@@ -170,7 +207,7 @@ func (h *Handler) Set(w http.ResponseWriter, r *http.Request) {
 		}
 		ttl = &parsed
 	}
-	if err := h.store.Set(r.PathValue("key"), *value, ttl); err != nil {
+	if err := h.store.SetContext(r.Context(), r.PathValue("key"), *value, ttl); err != nil {
 		h.storeError(w, err)
 		return
 	}
@@ -238,7 +275,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	result, err := h.store.Delete(r.PathValue("key"))
+	result, err := h.store.DeleteContext(r.Context(), r.PathValue("key"))
 	if err != nil {
 		h.storeError(w, err)
 		return
@@ -254,10 +291,16 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) storeError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, store.ErrCapacityExceeded):
+		h.writeError(w, 503, "CAPACITY_EXCEEDED", "데이터 용량 상한을 초과했습니다.")
 	case errors.Is(err, store.ErrInvalidArgument):
-		h.writeError(w, 400, "INVALID_ARGUMENT", err.Error())
+		h.writeError(w, 400, "INVALID_ARGUMENT", "요청 값이 올바르지 않습니다.")
 	case errors.Is(err, store.ErrLimitExceeded):
-		h.writeError(w, 413, "LIMIT_EXCEEDED", err.Error())
+		h.writeError(w, 413, "LIMIT_EXCEEDED", "키 또는 값의 크기 상한을 초과했습니다.")
+	case errors.Is(err, store.ErrOutcomeUnknown):
+		h.writeError(w, 503, "PERSISTENCE_OUTCOME_UNKNOWN", "변경 결과가 불명확합니다. 조회로 확인해 주세요.")
+	case errors.Is(err, store.ErrPersistence):
+		h.writeError(w, 503, "PERSISTENCE_UNAVAILABLE", "영속성 저장이 지연되거나 실패했습니다.")
 	default:
 		h.writeError(w, 500, "INTERNAL_ERROR", "내부 처리 오류입니다.")
 	}
@@ -283,4 +326,25 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, value any) {
 	if h.debugEnabled {
 		h.logger.Debug("HTTP_RESPONSE", "status", status)
 	}
+}
+
+func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		h.writeError(w, 405, "METHOD_NOT_ALLOWED", "GET 메서드를 사용해야 합니다.")
+		return
+	}
+	enabled, healthy := h.store.PersistenceHealth()
+	label := "disabled"
+	if enabled {
+		label = "aof"
+	}
+	status, code := "ok", 200
+	if !healthy {
+		status, label, code = "degraded", "error", 503
+	}
+	h.writeJSON(w, code, struct {
+		Status      string `json:"status"`
+		Persistence string `json:"persistence"`
+	}{status, label})
 }

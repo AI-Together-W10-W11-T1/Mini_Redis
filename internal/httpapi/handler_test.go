@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,13 +11,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"mini-redis/internal/store"
+	"github.com/AI-Together-W10-W11-T1/Mini_Redis/internal/store"
 )
 
 type fakeClock struct {
@@ -58,6 +60,7 @@ func testHandler(t *testing.T, limit int64) (http.Handler, *store.Store, *fakeCl
 		}
 	}
 	s := store.New(clock, logger)
+	t.Cleanup(func() { _ = s.Close() })
 	return NewHandlerWithMaxBodyBytes(s, logger, limit), s, clock
 }
 
@@ -302,8 +305,45 @@ type panicClock struct{}
 func (panicClock) Now() time.Time { panic("test internal failure") }
 
 func TestHTTPInternalError(t *testing.T) {
-	h := NewHandler(store.New(panicClock{}, nil), nil)
+	s := store.New(panicClock{}, nil)
+	t.Cleanup(func() { _ = s.Close() })
+	h := NewHandler(s, nil)
 	expectError(t, request(h, "GET", "/keys/error", ""), 500, "INTERNAL_ERROR")
+}
+
+func TestHTTPPersistenceUnavailable(t *testing.T) {
+	opts := store.DefaultAOFOptions(filepath.Join(t.TempDir(), "data.aof"))
+	s, err := store.OpenPersistent(nil, nil, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err = s.Set("keep", "old", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(s, nil)
+	expectError(t, request(h, "PUT", "/keys/keep", `{"value":"bad"}`), 503, "PERSISTENCE_UNAVAILABLE")
+	expectError(t, request(h, "DELETE", "/keys/keep", ""), 503, "PERSISTENCE_UNAVAILABLE")
+	expectJSON(t, request(h, "GET", "/keys/keep", ""), 200, `{"key":"keep","value":"old","ttl_ms":-1}`)
+}
+
+func TestHTTPMutationCancellation(t *testing.T) {
+	h, s, _ := testHandler(t, DefaultMaxBodyBytes)
+	if err := s.Set("keep", "old", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"PUT", "DELETE"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		r := httptest.NewRequest(method, "/keys/keep", strings.NewReader(`{"value":"bad"}`)).WithContext(ctx)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		expectError(t, w, 503, "PERSISTENCE_UNAVAILABLE")
+	}
+	expectJSON(t, request(h, "GET", "/keys/keep", ""), 200, `{"key":"keep","value":"old","ttl_ms":-1}`)
 }
 
 func TestExperimentWithDoubleDecoding(t *testing.T) {
@@ -329,4 +369,19 @@ func TestExperimentWithDoubleDecoding(t *testing.T) {
 		t.Fatal("experiment setup failed")
 	}
 	t.Fatalf("의도한 실패: 키를 두 번 디코딩 → %%2F 조회가 다른 키 /의 값 반환: %s", w.Body)
+}
+
+func TestPersistenceOutcomeErrorCodes(t *testing.T) {
+	h := &Handler{}
+	for _, tc := range []struct {
+		err  error
+		code string
+	}{
+		{store.ErrPersistence, "PERSISTENCE_UNAVAILABLE"},
+		{store.ErrOutcomeUnknown, "PERSISTENCE_OUTCOME_UNKNOWN"},
+	} {
+		w := httptest.NewRecorder()
+		h.storeError(w, tc.err)
+		expectError(t, w, 503, tc.code)
+	}
 }

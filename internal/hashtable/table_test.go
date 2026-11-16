@@ -84,6 +84,38 @@ func TestHashFNV1aKnownVectors(t *testing.T) {
 	}
 }
 
+func TestScanBoundedCollisionChain(t *testing.T) {
+	table := New(nil)
+	table.hash = func(string) uint64 { return 0 }
+	for i := 0; i < 1000; i++ {
+		table.Put(fmt.Sprint(i), Record{Value: fmt.Sprint(i)})
+	}
+	var cursor ScanCursor
+	seen := make(map[string]bool)
+	for calls := 0; ; calls++ {
+		if calls > 1000 {
+			t.Fatal("scan did not finish")
+		}
+		visited := 0
+		done := table.Scan(&cursor, 16, func(key string, r Record) {
+			visited++
+			if seen[key] || r.Value != key {
+				t.Fatalf("bad scan item %s", key)
+			}
+			seen[key] = true
+		})
+		if visited > 16 {
+			t.Fatal("long chain exceeded batch budget")
+		}
+		if done {
+			break
+		}
+	}
+	if len(seen) != 1000 {
+		t.Fatalf("visited=%d", len(seen))
+	}
+}
+
 func TestTableSetGetUpdateAndEmptyValue(t *testing.T) {
 	table := learningTable(t)
 	if table.Len() != 0 || table.Capacity() != 16 {

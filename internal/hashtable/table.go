@@ -27,8 +27,8 @@ type entry struct {
 type Table struct {
 	buckets      []*entry
 	size         int
-	logger       *slog.Logger	// 로그 출력기
-	hash         func(string) uint64 // 문자열을 받음 -> uint64 숫자를 반환, 테스트에서 함교수 체 될 수 있음
+	logger       *slog.Logger        // 로그 출력기
+	hash         func(string) uint64 // 문자열을 받음 -> uint64 숫자를 반환, 테스트에서 함수 교체 가능
 	debugEnabled bool                // Fixed at construction; runtime log-level changes are unsupported.
 }
 
@@ -156,6 +156,66 @@ func (t *Table) Delete(key string) bool {
 
 func (t *Table) Len() int      { return t.size }
 func (t *Table) Capacity() int { return len(t.buckets) }
+
+// Range visits copies of records. The caller must prevent concurrent access
+// and must not mutate the table from visit. Return false to stop early.
+func (t *Table) Range(visit func(string, Record) bool) {
+	for _, head := range t.buckets {
+		for current := head; current != nil; current = current.next {
+			if !visit(current.key, current.record) {
+				return
+			}
+		}
+	}
+}
+
+// ScanCursor is valid while inserts, updates and resizing are excluded.
+// Deletions may occur between batches; a deleted node may still be visited.
+type ScanCursor struct {
+	bucket   int
+	next     *entry
+	capacity int
+}
+
+// Scan bounds bucket probes plus node visits, including a long collision chain.
+// The caller protects each invocation and prevents writes across the scan.
+func (t *Table) Scan(cursor *ScanCursor, budget int, visit func(string, Record)) bool {
+	if budget <= 0 {
+		panic("scan budget must be positive")
+	}
+	for budget > 0 {
+		if cursor.next == nil {
+			if cursor.bucket >= len(t.buckets) {
+				return true
+			}
+			cursor.next = t.buckets[cursor.bucket]
+			cursor.bucket++
+			budget--
+			if cursor.next == nil {
+				continue
+			}
+			if budget == 0 {
+				break
+			}
+		}
+		current := cursor.next
+		cursor.next = current.next
+		visit(current.key, current.record)
+		budget--
+	}
+	return cursor.next == nil && cursor.bucket >= len(t.buckets)
+}
+
+// ScanWeak permits mutations BETWEEN calls. Inserts at already visited bucket
+// heads may wait until the next full cycle. Deleted nodes may still be visited;
+// callbacks must recheck membership before acting. Growth restarts the cursor.
+// This is suitable for opportunistic maintenance, never a consistent snapshot.
+func (t *Table) ScanWeak(cursor *ScanCursor, budget int, visit func(string, Record)) bool {
+	if cursor.capacity != len(t.buckets) {
+		*cursor = ScanCursor{capacity: len(t.buckets)}
+	}
+	return t.Scan(cursor, budget, visit)
+}
 
 func (t *Table) resize(newCapacity int) {
 	if t.debugEnabled {

@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"mini-redis/internal/httpapi"
-	"mini-redis/internal/store"
+	"github.com/AI-Together-W10-W11-T1/Mini_Redis/internal/httpapi"
+	"github.com/AI-Together-W10-W11-T1/Mini_Redis/internal/store"
 )
 
 type product struct {

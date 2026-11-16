@@ -54,7 +54,9 @@ func learningStore(t *testing.T) (*Store, *fakeClock) {
 			}))
 		}
 	}
-	return New(clock, logger), clock
+	s := New(clock, logger)
+	t.Cleanup(func() { _ = s.Close() })
+	return s, clock
 }
 
 func mustSet(t *testing.T, s *Store, key, value string, ttl *int64) {

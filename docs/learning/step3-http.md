@@ -64,7 +64,7 @@ level=INFO msg=START addr=127.0.0.1:8080 debug=true max_body_bytes=524288
 
 기본 주소는 `127.0.0.1:8080`이며 `MINI_REDIS_ADDR`로 변경한다. `MINI_REDIS_MAX_BODY_BYTES`는 기본 524288이다. `-debug=false`를 명시하면 환경변수보다 우선한다. 성능 측정은 반드시 debug=false로 실행한다.
 
-서버는 Ctrl+C로 종료한다. SIGTERM도 같은 종료 절차를 사용하며 STOP 로그를 남긴다. 종료 후 저장 데이터는 유지하지 않는다. 헤더 읽기 3초, 읽기·쓰기 5초, 유휴 연결 60초, 종료 대기 5초를 적용한다.
+서버는 Ctrl+C로 종료한다. SIGTERM도 같은 종료 절차를 사용하며 STOP 로그를 남긴다. 현재 AOF 기본 활성화로 정상 종료 시 최종 Sync를 수행한다. 메모리 전용 모드에서는 데이터를 보존하지 않는다. 최신 보장 범위는 docs/step4-persistence.md를 따른다. 헤더 읽기 3초, 읽기·쓰기 5초, 유휴 연결 60초, 전체 종료 대기 5초를 적용한다.
 
 ## 4. 터미널 B에서 직접 해볼 명령 5개
 

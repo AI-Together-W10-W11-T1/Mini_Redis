@@ -198,7 +198,7 @@ func (a *app) cachePut(r *http.Request, id, value string) error {
 // call reads the whole response so the connection can be reused.
 func (a *app) call(r *http.Request, method, address string, payload []byte, toCache bool) (int, []byte, error) {
 	ctx := r.Context()
-	if toCache {
+	if toCache && a.cacheFallback {
 		timeout := a.cacheTimeout
 		if timeout <= 0 {
 			timeout = 200 * time.Millisecond

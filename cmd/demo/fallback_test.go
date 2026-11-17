@@ -218,3 +218,37 @@ func TestCacheFallbackPreservesNormalPaths(t *testing.T) {
 		})
 	}
 }
+
+// Strict mode keeps the existing client timeout even if a short cache timeout
+// is configured. Check the context directly rather than sleeping for 3 seconds.
+func TestCacheTimeoutOnlyInFallbackMode(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+			name := "strict_" + method
+			if enabled {
+				name = "fallback_" + method
+			}
+			t.Run(name, func(t *testing.T) {
+				client := &http.Client{Timeout: 3 * time.Second, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					deadline, ok := r.Context().Deadline()
+					if !ok {
+						t.Fatal("missing request deadline")
+					}
+					remaining := time.Until(deadline)
+					if enabled && remaining > 200*time.Millisecond {
+						t.Fatalf("fallback deadline too long: %s", remaining)
+					}
+					if !enabled && remaining < 2*time.Second {
+						t.Fatalf("strict deadline shortened: %s", remaining)
+					}
+					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+				})}
+				a := &app{client: client, cacheFallback: enabled, cacheTimeout: 200 * time.Millisecond}
+				status, _, err := a.call(httptest.NewRequest("GET", "/", nil), method, "http://cache.test/keys/x", nil, true)
+				if err != nil || status != 200 {
+					t.Fatalf("status=%d err=%v", status, err)
+				}
+			})
+		}
+	}
+}

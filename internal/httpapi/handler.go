@@ -199,13 +199,13 @@ func (h *Handler) Set(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !validStringEscapes(fields["value"]) {
-		h.writeError(w, 400, "INVALID_ARGUMENT", "value의 유니코드 이스케이프가 올바르지 않습니다.")
-		return
-	}
 	var value *string
 	if err := json.Unmarshal(fields["value"], &value); err != nil || value == nil {
 		h.writeError(w, 400, "INVALID_ARGUMENT", "value는 문자열이어야 합니다.")
+		return
+	}
+	if !validStringEscapes(fields["value"]) {
+		h.writeError(w, 400, "INVALID_ARGUMENT", "value의 유니코드 이스케이프가 올바르지 않습니다.")
 		return
 	}
 	var ttl *int64

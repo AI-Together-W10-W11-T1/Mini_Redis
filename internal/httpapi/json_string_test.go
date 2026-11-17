@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -95,5 +96,20 @@ func TestAcceptValidUnicodeAndLiteralEscapes(t *testing.T) {
 				t.Fatalf("value=%q want %q", got.Value, tc.want)
 			}
 		})
+	}
+}
+
+func TestValueTypeErrorPrecedesUnicodeEscapeCheck(t *testing.T) {
+	h, _, _ := testHandler(t, DefaultMaxBodyBytes)
+	for _, body := range []string{`{"ttl_ms":5}`, `{"value":null}`, `{"value":5}`, `{"value":true}`, `{"value":[]}`, `{"value":{}}`} {
+		w := request(h, "PUT", "/keys/x", body)
+		expectError(t, w, 400, "INVALID_ARGUMENT")
+		var response errorResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Error.Message != "value는 문자열이어야 합니다." {
+			t.Fatalf("body=%s message=%q", body, response.Error.Message)
+		}
 	}
 }

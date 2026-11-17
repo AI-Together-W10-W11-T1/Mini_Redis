@@ -44,7 +44,7 @@ func parseOptions(args []string, lookup func(string) (string, bool)) (options, e
 	flags.IntVar(&o.products, "products", 100, "number of seeded products (ids 1..N)")
 	flags.DurationVar(&o.timeout, "timeout", 3*time.Second, "timeout of calls to the origin (also caps cache calls)")
 	flags.BoolVar(&o.cacheFallback, "cache-fallback", false, "return origin responses when cache reads or fills fail")
-	flags.DurationVar(&o.cacheTimeout, "cache-timeout", 200*time.Millisecond, "timeout of each mini-Redis call")
+	flags.DurationVar(&o.cacheTimeout, "cache-timeout", 200*time.Millisecond, "timeout of each mini-Redis call when cache-fallback is enabled")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}

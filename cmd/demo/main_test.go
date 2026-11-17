@@ -334,10 +334,14 @@ func TestParseOptions(t *testing.T) {
 	}
 	o, err := parseOptions([]string{"-redis-url", "http://127.0.0.1:9000/", "-origin-delay", "20ms"}, env)
 	if err != nil || o.redisURL != "http://127.0.0.1:9000" || o.delay != 20*time.Millisecond ||
-		o.ttlMillis != 60_000 || o.products != 100 || o.token != "secret-token-0123456789" {
+		o.cacheFallback || o.cacheTimeout != 200*time.Millisecond || o.ttlMillis != 60_000 || o.products != 100 || o.token != "secret-token-0123456789" {
 		t.Fatalf("options=%+v err=%v", o, err)
 	}
-	for _, args := range [][]string{{"-cache-ttl-ms", "0"}, {"-origin-delay", "-1s"}, {"extra"}, {"-unknown"}} {
+	enabled, err := parseOptions([]string{"-cache-fallback", "-cache-timeout", "50ms"}, env)
+	if err != nil || !enabled.cacheFallback || enabled.cacheTimeout != 50*time.Millisecond {
+		t.Fatalf("options=%+v err=%v", enabled, err)
+	}
+	for _, args := range [][]string{{"-cache-timeout", "0"}, {"-cache-timeout", "-1ms"}, {"-cache-fallback=invalid"}, {"-cache-ttl-ms", "0"}, {"-origin-delay", "-1s"}, {"extra"}, {"-unknown"}} {
 		if _, err := parseOptions(args, env); err == nil {
 			t.Fatalf("%v: expected an error", args)
 		}

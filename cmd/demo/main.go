@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -18,15 +19,17 @@ import (
 )
 
 type options struct {
-	originAddr string
-	appAddr    string
-	originURL  string
-	redisURL   string
-	token      string
-	delay      time.Duration
-	ttlMillis  int64
-	products   int
-	timeout    time.Duration
+	originAddr    string
+	appAddr       string
+	originURL     string
+	redisURL      string
+	token         string
+	delay         time.Duration
+	ttlMillis     int64
+	products      int
+	timeout       time.Duration
+	cacheFallback bool
+	cacheTimeout  time.Duration
 }
 
 func parseOptions(args []string, lookup func(string) (string, bool)) (options, error) {
@@ -39,15 +42,17 @@ func parseOptions(args []string, lookup func(string) (string, bool)) (options, e
 	flags.DurationVar(&o.delay, "origin-delay", 100*time.Millisecond, "artificial origin response delay")
 	flags.Int64Var(&o.ttlMillis, "cache-ttl-ms", 60_000, "TTL of cached products in milliseconds")
 	flags.IntVar(&o.products, "products", 100, "number of seeded products (ids 1..N)")
-	flags.DurationVar(&o.timeout, "timeout", 3*time.Second, "timeout of calls to the origin and mini-Redis")
+	flags.DurationVar(&o.timeout, "timeout", 3*time.Second, "timeout of calls to the origin (also caps cache calls)")
+	flags.BoolVar(&o.cacheFallback, "cache-fallback", false, "return origin responses when cache reads or fills fail")
+	flags.DurationVar(&o.cacheTimeout, "cache-timeout", 200*time.Millisecond, "timeout of each mini-Redis call when cache-fallback is enabled")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
 	if flags.NArg() != 0 {
 		return options{}, fmt.Errorf("unexpected positional arguments")
 	}
-	if o.delay < 0 || o.ttlMillis <= 0 || o.products < 0 || o.timeout <= 0 {
-		return options{}, fmt.Errorf("origin-delay must be >= 0; cache-ttl-ms and timeout must be positive; products must be >= 0")
+	if o.delay < 0 || o.ttlMillis <= 0 || o.products < 0 || o.timeout <= 0 || o.cacheTimeout <= 0 {
+		return options{}, fmt.Errorf("origin-delay must be >= 0; cache-ttl-ms, timeout and cache-timeout must be positive; products must be >= 0")
 	}
 	o.redisURL = strings.TrimRight(o.redisURL, "/")
 	o.originURL = strings.TrimRight(o.originURL, "/")
@@ -106,6 +111,7 @@ func run(args []string) error {
 	consumer := &app{
 		client:    &http.Client{Timeout: o.timeout, Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 128, IdleConnTimeout: 90 * time.Second}},
 		originURL: originURL, redisURL: o.redisURL, token: o.token, ttlMillis: o.ttlMillis,
+		cacheFallback: o.cacheFallback, cacheTimeout: o.cacheTimeout, logger: slog.Default(),
 	}
 	appURL, err := serve("app", o.appAddr, consumer.handler())
 	if err != nil {
